@@ -1,0 +1,264 @@
+---
+title: "Birth Weights"
+author: "Léon Yuan"
+format: pdf
+editor: visual
+---
+
+# Explore Data Analysis
+
+## How many Black in this data?
+
+It is quite balanced variable. There are 662 black mother and 453 non-black mother.
+
+```{r}
+table(df$black)
+```
+
+## Education year distribution by black mother and non-black
+
+From this density curve by black or not, we can tell that both groups have around 12 years of education to be mode/peak. However, black mothers density curve has sharper multiple modes such as 9, 10, 11, 13, 14, 15. Black mothers have much more education of 12 years than non-black mothers do while non-black mothers have more of education years more than 15 than black mothers.
+
+```{r}
+#| message: false
+library(tidyverse)
+cols <- c("#F76D5E", "#FFFFBF")
+# Basic density plot in ggplot2
+ggplot(df, aes(x = educ, fill = black)) +
+  geom_density(alpha = 0.7) + 
+  scale_fill_manual(values = cols) 
+```
+
+## How many smoke/non-smoke in black/non-black mother?
+
+In general, there are more black smoker mother than non-black mothers. Within the black group and non-black group, there is higher rate of smokers in black than non-black.
+
+```{r}
+#| message: false
+library(scales)
+df |>
+  count(black, smoke) |>
+  group_by(black) |>
+  mutate(prop = n / sum(n)) |>
+  ggplot(aes(x = black, fill = smoke, y = n,
+             label = percent(prop, accuracy = 0.1))) +
+  geom_bar(position="dodge", stat="identity") +
+  geom_text(position = position_dodge(width = .9),# move to center of bars
+              vjust = -0.5,    # nudge above top of bar
+              size = 4) +
+  ggtitle("Smoke/Non-smoke by black or not")
+```
+
+## Gestate distribution by black
+
+This shows gestate is very skewed distributed, this violates the linear regression assumptions of Multivariate normality.
+
+```{r}
+cols <- c("#F76D5E", "#FFFFBF")
+# Basic density plot in ggplot2
+ggplot(df, aes(x = gestate, fill = black)) +
+  geom_density(alpha = 0.7) + 
+  scale_fill_manual(values = cols)
+```
+
+# Fit a ordinary linear regression model
+
+The ordinary linear regression performs very poor on this data set because the adjusted R squared is only 52.61%.
+
+```{r}
+fit <- lm(grams ~., data = df)
+summary(fit)
+```
+
+The residuals closely form a normal distribution, however, residuals are very heteroscedasticity, as the fitted values increases, the variance of residuals increases as well radically.
+
+```{r}
+plot(fit)
+extractAIC(fit, k=log(nrow(df)))
+```
+
+Take a close look at the distribution of grams:
+
+```{r}
+plot(density(df$grams))
+```
+
+```{r}
+sum(df$grams < 2000)
+```
+
+# Take a log transformation on the grams variable then OLS
+
+```{r}
+fit2 <- lm(log(grams) ~., data = df)
+summary(fit2)
+```
+
+```{r}
+plot(fit2)
+extractAIC(fit2, k=log(nrow(df)))
+```
+
+# Take a log on y and add interaction between black and smoke
+
+```{r}
+fit3 <- lm(log(grams) ~ black + black:smoke + smoke + educ + gestate, data = df)
+summary(fit3)
+```
+
+```{r}
+plot(fit3)
+```
+
+# Fit a model with all possible interaction
+
+```{r}
+fit4 <- lm(log(grams) ~ (black + educ + smoke + gestate)^2, df)
+summary(fit4)
+```
+
+```{r}
+plot(fit4)
+```
+
+# Use BIC to backforward select the best model
+
+```{r}
+model_bic <- step(fit4, direction = "backward", k=log(nrow(df)))
+```
+
+```{r}
+fit5 <- lm(log(grams) ~ black + educ + smoke + gestate + black:educ + black:smoke + black:gestate + educ:gestate + smoke:gestate, df)
+summary(fit5)
+```
+
+```{r}
+plot(fit5)
+```
+
+# Make box-cox transformation on y
+
+```{r}
+plot(density(log(df$grams)))
+```
+
+# Try random forest
+
+```{r}
+#| message: false
+library(randomForest)
+library(datasets)
+library(caret)
+library(pROC)
+library(glmnet)
+```
+
+```{r}
+set.seed(222)
+ind <- sample(2, nrow(df), replace = TRUE, prob = c(0.8, 0.2))
+train <- df[ind==1,]
+test <- df[ind==2,]
+dim(train)
+dim(test)
+```
+
+```{r}
+rf <- randomForest(x = train[-5],
+                   y = log(train$grams),
+                   xtest = test[-5],
+                   ytest = log(test$grams),
+                   ntree = 500,
+                   mtry = 2,
+                   proximity = TRUE)
+print(rf)
+```
+
+```{r}
+varImpPlot(rf,
+           sort = T,
+           n.var = 4,
+           main = "Top 4 - Variable Importance")
+importance(rf)
+```
+
+```{r}
+fit6 <- lm(log(grams) ~ black + educ + smoke + gestate + black:educ + black:smoke + black:gestate + educ:gestate + smoke:gestate, train)
+summary(fit6)
+pred <- predict(fit6, newdata = test[-5])
+mean((pred-log(test$grams))^2)
+```
+
+```{r}
+plot(density(log(df$gram)))
+boxcox(grams^2 ~ black + educ + smoke + log(gestate), data = df)
+```
+
+```{r}
+set.seed(123) 
+a = 0.3
+f = "gaussian"
+# Encode matrix into dummy variable forms for all categorical variables
+x.train <- model.matrix(log(grams) ~ (black + educ + smoke + log(gestate))^2,
+                        train)[,-1]
+# Use Elastic net with logistics regression on this train dataset with alpha = 0.5
+cv.elastic <- cv.glmnet(x = x.train, y = log(train$grams), 
+                      alpha = a, family = f)
+# Build a final model with the best lambda selected by cross validation measured by Binomial Deviance
+best_elastic <- glmnet(x.train, y = log(train$grams), alpha = a, family = f,
+                lambda = cv.elastic$lambda.1se)
+coef(best_elastic)
+plot(cv.elastic, main = "Cross-Validation to select shrinkega lamda")
+```
+
+```{r}
+x.test <- model.matrix(log(grams) ~ (black + log(educ) + smoke + log(gestate))^2,
+                        test)[,-1]
+prob_elastic <- predict(best_elastic, newx = x.test, type = "response")
+mean((prob_elastic-log(test$grams))^2)
+```
+
+```{r}
+fit7 <- glm(grams ~ (black + educ + smoke + log(gestate))^2,
+            data = df,
+            family = inverse.gaussian(link = "inverse"))
+summary(fit7)
+plot(x=predict(fit7, type = "link"), y=residuals(fit7, "pearson"))
+```
+
+```{r}
+fit8 <- glm(log(grams) ~ (black + educ + smoke + log(gestate))^2,
+            data = train,
+            family = "gaussian")
+for (i in 1:20)
+{
+  w <- 1/predict(fit8, type = "response")^2
+  fit8 <- glm(log(grams) ~ (black + educ + smoke + log(gestate))^2,
+                      data = train,
+                      family = "gaussian",
+                      weights = w)
+}
+plot(x=predict(fit8, type = "link"), y=residuals(fit8, "pearson"))
+pred_fit8 <- predict(fit8, newdata = test, type = "response")
+mean((pred_fit8-log(test$grams))^2)
+View(cbind(test, exp(pred_fit8)))
+```
+
+```{r}
+fit9 <- rlm(log(grams) ~ (black + educ + smoke + log(gestate))^2,
+            data = train,
+            maxit = 100, psi = psi.bisquare)
+for (i in 1:20)
+{
+  w <- 1/predict(fit9, type = "response")^2
+  fit9 <- rlm(log(grams) ~ (black + educ + smoke + log(gestate))^2,
+                      data = train,
+                      maxit = 100, 
+                      psi = psi.bisquare,
+                      weights = w)
+}
+plot(x=predict(fit9, type = "response"), y=residuals(fit9, "pearson"))
+pred_fit9 <- predict(fit9, newdata = test, type = "response")
+mean((pred_fit9-log(test$grams))^2)
+View(cbind(test, exp(pred_fit9)))
+```
+
