@@ -1,0 +1,405 @@
+---
+title: "Birth Weights"
+subtitle: "Linear Regression 6345 Final Project"
+author: "Léon Yuan"
+thanks: "Thank Dr. Cao and other classmates for instructions and peer-helps through Spring 2023!"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+geometry: "left=2cm,right=2cm,top=1cm,bottom=2cm"
+format: pdf
+editor: visual
+---
+
+```{r}
+#| echo: false
+df = read.table(file = "phbirths-1.dat",
+                header = T)
+n = nrow(df)
+```
+
+# Simple Exploratory Data Analysis
+
+`black` is quite a balanced variable. There are 662 black mother and 453 non-black mother. In general, there are more black smoker mother than non-black mothers. Within the black group and non-black group, there is higher rate of smokers in black group than non-black. This shows gestate is very skewed distributed, this violates the linear regression assumptions of Multivariate normality. The figure @fig-gestate shows `gestate` is very skewed distributed, and this violates the linear regression assumptions of **Multivariate Normality**. The figure @fig-cor shows that `gestate` has very strong positive correlation with the response `grams` while `educ` doesn't have obvious relation with `grams`. `gestate` does not show obvious relation with `educ`.
+
+```{r}
+#| message: false
+#| echo: false
+#| fig-align: center
+#| fig-height: 2
+#| label: fig-gestate
+#| fig-cap: Density Plot of Gestate by black/non-black
+library(tidyverse)
+cols <- c("#F76D5E", "#FFFFBF")
+# Basic density plot in ggplot2
+ggplot(df, aes(x = gestate, fill = black)) +
+  geom_density(alpha = 0.7) + 
+  scale_fill_manual(values = cols) +
+  ggtitle("Density Plot of Gestate by black/non-black")
+```
+
+```{r}
+#| message: false
+#| echo: false
+#| fig-align: center
+#| fig-height: 2.5
+#| label: fig-cor
+#| fig-cap: Correlation Plot between numerical variables
+plot(df[,-c(1,3)])
+```
+
+# Compare different generalized linear models
+
+I will mainly use the predictive performance on the hold-out test set to compare models combined with deviance and pearson residuals. First I randomly split the data into 80% training set, 909 observations and 20% test set, 206 observations. Then I will fit all kinds of model on this train and evaluate on the test, finally compare.
+
+
+```{r}
+#| message: false
+#| echo: false
+library(randomForest)
+library(datasets)
+library(caret)
+library(pROC)
+library(glmnet)
+library(Metrics)
+library(MASS)
+```
+
+```{r}
+#| echo: false
+#| output: false
+set.seed(222)
+ind <- sample(2, nrow(df), replace = TRUE, prob = c(0.8, 0.2))
+train <- df[ind==1,]
+test <- df[ind==2,]
+n_train <- nrow(train)
+n_test <- nrow(test)
+```
+
+```{r}
+#| label: ordinary linear regression
+#| echo: false
+#| output: false
+fit1 <- lm(grams~., train)
+summary(fit1)
+plot(fit1)
+pred1 <- predict(fit1, newdata = test)
+rmse1 <- rmse(test$grams, pred1)
+bic1 <- extractAIC(fit1, k=log(n_train))[2]
+aic1 <- extractAIC(fit1)[2]
+```
+
+```{r}
+#| label: ordinary log linear regression
+#| echo: false
+#| output: false
+fit2 <- lm(log(grams)~., train)
+summary(fit2)
+plot(fit2)
+pred2 <- predict(fit2, newdata = test)
+rmse2 <- rmse(test$grams, exp(pred2))
+bic2 <- extractAIC(fit2, k=log(n_train))[2]
+aic2 <- extractAIC(fit2)[2]
+```
+
+```{r}
+#| label: ordinary gestate^8 linear regression by box-cox
+#| echo: false
+#| output: false
+boxcox(lm(gestate~1,train), lambda = seq(-2,20,1/10))
+fit3 <- lm(grams~black+educ+smoke+I(gestate^8), train)
+summary(fit3)
+plot(fit3)
+pred3 <- predict(fit3, newdata = test)
+rmse3 <- rmse(test$grams, pred3)
+bic3 <- extractAIC(fit3, k=log(n_train))[2]
+aic3 <- extractAIC(fit3)[2]
+```
+
+```{r}
+#| label: ordinary linear regression with all interactions
+#| echo: false
+#| output: false
+fit4 <- lm(grams ~ (black + educ + smoke + gestate)^2, train)
+summary(fit4)
+plot(fit4)
+pred4 <- predict(fit4, newdata = test)
+rmse4 <- rmse(test$grams, pred4)
+bic4 <- extractAIC(fit4, k=log(n_train))[2]
+aic4 <- extractAIC(fit4)[2]
+```
+
+```{r}
+#| label: ordinary linear regression with all interactions and log on y
+#| echo: false
+#| output: false
+fit5 <- glm(grams ~ (black + educ + smoke + gestate)^2, train,
+            family=gaussian(link = "log"))
+summary(fit5)
+#plot(fit5)
+pred5 <- predict(fit5, newdata = test)
+plot(x=predict(fit5, newdata = train, type = "link"), y=residuals(fit5, "pearson"))
+rmse5 <- rmse(test$grams, exp(pred5))
+bic5 <- extractAIC(fit5, k=log(n_train))[2]
+aic5 <- fit5$aic
+```
+
+```{r}
+#| label: elastic with all interactions
+#| echo: false
+#| output: false
+set.seed(123) 
+a = 0.1
+f = "gaussian"
+# Encode matrix into dummy variable forms for all categorical variables
+x.train <- model.matrix(grams ~ (black + educ + smoke + gestate)^2,
+                        train)[,-1]
+# Use Elastic net with logistics regression on this train dataset with alpha = 0.5
+cv.elastic <- cv.glmnet(x = x.train, y = train$grams, 
+                      alpha = a, family = f)
+# Build a final model with the best lambda selected by cross validation measured by Binomial Deviance
+fit6 <- glmnet(x.train, y = train$grams, alpha = a, family = f,
+                lambda = cv.elastic$lambda.1se)
+x.test <- model.matrix(grams ~ (black + educ + smoke + gestate)^2,
+                        test)[,-1]
+pred6 <- predict(fit6, newx = x.test, type = "response")
+#plot(x=pred6, y=residuals(fit6, "pearson"))
+rmse6 <- rmse(test$grams, pred6)
+rmse6
+tLL <- fit6$nulldev - deviance(fit6)
+k <- fit6$df
+n <- fit6$nobs
+bic6 <- log(n)*k - tLL
+aic6 <- -tLL+2*k+2*k*(k+1)/(n-k-1)
+```
+
+```{r}
+#| label: fig-IRLS
+#| echo: false
+#| fig-cap: IRLS model's pearson residuals against its link
+#| fig-height: 3
+fit7 <- glm(grams ~ (black + educ + smoke + gestate)^2,
+            data = train,
+            family = "gaussian")
+for (i in 1:20)
+{
+  w <- 1/predict(fit7, type = "response")^2
+  fit7 <- glm(grams ~ (black + educ + smoke + gestate)^2,
+                      data = train,
+                      family = "gaussian",
+                      weights = w)
+}
+plot(x=predict(fit7, type = "link"), y=residuals(fit7, "pearson"),
+     xlab = "IRLS's Link", ylab = "Pearson Residuals", main = "IRLS's pearson residuals vs link")
+pred7 <- predict(fit7, newdata = test, type = "response")
+rmse7 <- rmse(test$grams, pred7)
+aic7 <- fit7$aic
+bic7 <- extractAIC(fit7, k=log(n_train))[2]
+```
+
+```{r}
+#| label: robust least squares with all interactions
+#| echo: false
+#| output: false
+fit8 <- rlm(grams ~ black + educ + smoke + I(gestate^2),
+            data = train,
+            family = "gaussian", maxit = 100, psi = psi.bisquare)
+for (i in 1:20)
+{
+  w <- 1/predict(fit8, type = "response")^4
+  fit8 <- rlm(grams ~ black + educ + smoke + I(gestate^2) ,
+            data = train,
+            family = "gaussian", maxit = 100, psi = psi.bisquare,
+            weights = w)
+}
+plot(x=predict(fit8, type = "response"), y=residuals(fit8, "pearson"))
+pred8 <- predict(fit8, newdata = test, type = "response")
+rmse8 <- rmse(test$grams, pred8)
+bic8 <- extractAIC(fit8, k=log(n_train))[2]
+aic8 <- fit8$aic
+```
+
+```{r}
+#| label: ridge with all interactions
+#| echo: false
+#| output: false
+set.seed(123) 
+a = 0
+f = "gaussian"
+# Encode matrix into dummy variable forms for all categorical variables
+x.train <- model.matrix(grams ~ (black + educ + smoke + gestate)^2,
+                        train)[,-1]
+# Use Elastic net with logistics regression on this train dataset with alpha = 0.5
+cv.elastic <- cv.glmnet(x = x.train, y = train$grams, 
+                      alpha = a, family = f)
+# Build a final model with the best lambda selected by cross validation measured by Binomial Deviance
+fit9 <- glmnet(x.train, y = train$grams, alpha = a, family = f,
+                lambda = cv.elastic$lambda.1se)
+x.test <- model.matrix(grams ~ (black + educ + smoke + gestate)^2,
+                        test)[,-1]
+pred9 <- predict(fit9, newx = x.test, type = "response")
+#plot(x=pred6, y=residuals(fit6, "pearson"))
+rmse9 <- rmse(test$grams, pred9)
+rmse9
+tLL <- fit9$nulldev - deviance(fit9)
+k <- fit9$df
+n <- fit9$nobs
+bic9 <- log(n)*k - tLL
+aic9 <- -tLL+2*k+2*k*(k+1)/(n-k-1)
+```
+
+```{r}
+#| label: lasso with all interactions
+#| echo: false
+#| output: false
+set.seed(123) 
+a = 1
+f = "gaussian"
+# Encode matrix into dummy variable forms for all categorical variables
+x.train <- model.matrix(grams ~ (black + educ + smoke + gestate)^2,
+                        train)[,-1]
+# Use Elastic net with logistics regression on this train dataset with alpha = 0.5
+cv.elastic <- cv.glmnet(x = x.train, y = train$grams, 
+                      alpha = a, family = f)
+# Build a final model with the best lambda selected by cross validation measured by Binomial Deviance
+fit10 <- glmnet(x.train, y = train$grams, alpha = a, family = f,
+                lambda = cv.elastic$lambda.1se)
+x.test <- model.matrix(grams ~ (black + educ + smoke + gestate)^2,
+                        test)[,-1]
+pred10 <- predict(fit10, newx = x.test, type = "response")
+#plot(x=pred6, y=residuals(fit6, "pearson"))
+rmse10 <- rmse(test$grams, pred10)
+rmse10
+tLL <- fit10$nulldev - deviance(fit10)
+k <- fit10$df
+n <- fit10$nobs
+bic10 <- log(n)*k - tLL
+aic10 <- -tLL+2*k+2*k*(k+1)/(n-k-1)
+```
+
+```{r}
+#| label: inverse gaussian least squares with all interactions
+#| echo: false
+#| output: false
+fit11 <- glm(grams ~ (black + educ + smoke + gestate)^2,
+            data = train,
+            family = inverse.gaussian(link = "identity"))
+for (i in 1:20)
+{
+  w <- 1/predict(fit11, type = "response")^2
+  fit11 <- glm(grams ~ (black + educ + smoke + gestate)^2,
+                      data = train,
+                      family = inverse.gaussian(link = "identity"),
+                      weights = w)
+}
+plot(x=predict(fit11, type = "link"), y=residuals(fit11, "pearson"))
+pred11 <- predict(fit11, newdata = test, type = "response")
+rmse11 <- rmse(test$grams, pred11)
+bic11 <- extractAIC(fit11, k=log(n_train))[2]
+aic11 <- fit11$aic
+```
+
+```{r}
+#| label: random forest
+#| echo: false
+#| output: false
+set.seed(12)
+rf <- randomForest(x = train[-5],
+                   y = train$grams,
+                   xtest = test[-5],
+                   ytest = test$grams,
+                   ntree = 400,
+                   mtry = 2,
+                   proximity = TRUE)
+print(rf)
+rmse12 = sqrt(159923.3)
+```
+
+All the comparison results are shown in @tbl-c. In this table, I fitted models including, ordinary linear regression, log-link linear regression, Box-Cox on `gestate` linear regression, all two-way interaction linear regression, log-link all two-way interaction LS, Elastic Net all two-way interaction LS, iteratively reweighted least squares with all two-way interactions,robust all two-way interaction LS, ridge all two-way interaction LS, lasso all two-way interaction LS, inverse Gaussian with all interaction least squares. There are 11 models that are compared in this @tbl-c. All these models are trained on the **same** training set then are evaluated on the **same** test set as split beforehand. I chose primary two measurement to select the appropriate model, one is *RMSE* on the test set which is to measure models' predictive performance, another one is *BIC* on the training set which is to evaluate models' variation/explanation performance. In such way, I could consider both part instead of one. Beyond that, I also used pearson residual plot to diagnostic the model assumptions. In the ordinary least regression, from the residuals vs fitted plot, the variance of residuals increases a lot as the fitted values increase forming a fan shape, especially around fitted value = 3200, the variance of residuals is the largest. This violated the multivariate linear regression assumptions: **homoscedasticity**. I also found that `gram` variable is left skewed. Based on above finding, I assumed that weighted least squared may fix above issue. Thus I further investigated the weighted least squares with iteratively reweighted least squares with all two-way interactions. IRLS model has relative small RMSE on the test set. The most important advantage of IRLS model is it has more homoscedasticity of residual variance and the magnitude of its pearson residuals is within 1. These two features are shown in @fig-IRLS. Among these 11 models, the Box-Cox model fixed the **heteroskedasticity** problem well by powering the `gestate` to 8. However, Box-Cox model's RMSE on the test is 476.71 which is much larger than IRLS's 415.64.
+
+
+```{r}
+#| echo: false
+#| message: false
+#| label: tbl-c
+#| tbl-cap: Compare all kinds of model fitted
+library(kableExtra)
+ct <- data.frame(id = 1:12,
+  model = c("OLS", "log(grams) OLS", "Box-Cox OLS", "OLS all inter", 
+                           "log(grams) all inter", "ElasticNet all inter", 
+                           "IRLS all inter", "robust LS all inter", 
+                           "Ridge LS all inter", "Lasso LS all inter","inverse Gaussian all inter","Random Forest" ),
+          RMSE_on_Test = c(rmse1, rmse2, rmse3, rmse4, rmse5, rmse6, rmse7, rmse8, rmse9, rmse10, rmse11,rmse12),
+          BIC_on_Train = c(bic1, bic2, bic3, bic4, bic5, bic6, bic7, bic8, bic9, bic10, bic11,NA),
+          AIC_on_Train = c(aic1, aic2, aic3, aic4, aic5, aic6, aic7, NA, aic9, aic10, aic11,NA))
+kbl(ct,booktabs=T) %>% 
+  kable_styling(latex_options="striped")
+```
+
+Once I chose the model class: **iteratively reweighted least squares**, I have to do variable selection because the original model is a saturated model including all two-way interaction terms. I used `regsubsets` method measured by *BIC* to select the variables which are kept in the final model. The following @fig-subset is the plot to show the exhaustive search by *BIC*. There are three models that share the same *BIC=-660*. I prefer to choose simpler model for easier interpretation. Thus, I chose the top second model as my final model specification. 
+$$\text{grams}_i=\beta_0+\beta_1\cdot\text{smoke}_i+\beta_2\cdot\text{gestate}_i+\beta_3\cdot\text{smoke}_i\times\text{black}_i+\beta_4\cdot\text{gestate}_i\times\text{black}_i + \epsilon_i$$ where $$\epsilon_i\sim N\left(0, \frac{\sigma^2}{\text{gram}_i}\right)$$
+
+```{r}
+#| echo: false
+#| message: false
+#| label: fig-subset
+#| fig-cap: Model Selection by exhaustive search
+library(leaps)
+regs <- regsubsets(grams ~ (black + educ + smoke + gestate)^2,
+            data = train)
+plot(regs)
+```
+
+Based on the **iteratively reweighted least squares** model class and the above model specification, I fitted this model by this configuration and used the $1/\text{gram}_i^2$ as weights to iteratively update models and weights. My final model has about *RMSE = 410*  which is better than IRLS model before subset and $Residual Deviance = 18.166$ compared to the $Null deviance = 271.341$. The dispersion parameter for Gaussian family is 0.02. From the `anova` @tbl-anova given in appendix with *F* test for Gaussian Family, **smoke and gestate** are two the most significant variable with p-value equal to near 0 compared with two interaction terms **black:gestate and black:smoke**. The final IRLS model coefficient estimations are shown in @tbl-final. @tbl-vif shows the final model only has moderate Variance Inflation Factor among all predictors suggesting that **Multicollinearity** is not a big issue. Given all other variables fixed, if a woman smokes, then expected weights of her baby would decrease 397 grams with standard deviation 52. Given all other variables fixed, if a woman has one more gestational week, her baby birth weight would increase 161 which is very accurate because this coefficient only has 1.7 standard deviation. An interesting result is that comparing one black woman who smokes with one non-black woman who doesn't smoke given `gestate` the same, this black woman's expected baby weight is 367 more than that non-black woman's expected baby weight. Black mother's one more gestational week would decrease 6.299 grams in her baby weight given the same smoke status. This decrease in 6.299 only has 0.913 standard deviation.
+
+```{r}
+#| label: IRLS final
+#| echo: false
+#| output: false
+fit_final <- glm(grams ~ smoke + black:gestate + black:smoke + gestate,
+            data = train,
+            family = "gaussian")
+for (i in 1:20)
+{
+  w <- 1/predict(fit_final, type = "response")^2
+  fit_final <- glm(grams ~ smoke + black:gestate + black:smoke + gestate,
+                      data = train,
+                      family = "gaussian",
+                      weights = w)
+}
+plot(x=predict(fit_final, type = "link"), y=residuals(fit_final, "pearson"),
+     xlab = "IRLS's Link", ylab = "Pearson Residuals", main = "IRLS's pearson residuals vs link")
+pred_f <- predict(fit_final, newdata = test, type = "response")
+rmse_f <- rmse(test$grams, pred_f)
+aic_f <- fit_final$aic
+bic_f <- extractAIC(fit_final, k=log(n_train))[2]
+dev_f = fit_final$deviance
+```
+
+# Appendix
+
+```{r}
+#| echo: false
+#| label: tbl-anova
+#| tbl-cap: ANOVA table for the final model
+kable(anova(fit_final, test = "F"), booktab = T) |>
+  kable_styling(latex_options="striped")
+```
+
+```{r results='asis'}
+#| echo: false
+#| message: false
+#| label: tbl-final
+#| tbl-cap: IRLS Final Model Estimation
+library(stargazer)
+stargazer(fit_final)
+```
+
+```{r}
+#| message: false
+#| echo: false
+#| label: tbl-vif
+#| tbl-cap: Variance Inflation Factor table for the final model
+library(car)
+kable(vif(fit_final), booktab=T) %>%
+  kable_styling(latex_options="striped")
+```
+
